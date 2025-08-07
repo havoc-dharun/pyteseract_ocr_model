@@ -8,6 +8,7 @@ import json
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from google.oauth2 import service_account
 try:
     import google.generativeai as genai
 except Exception:
@@ -22,6 +23,7 @@ TOKEN_FILE = "credentials/token.json"
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
 USE_GEMINI_DEFAULT = os.getenv('USE_GEMINI', '0') == '1'
+SERVICE_ACCOUNT_FILE = os.getenv('SERVICE_ACCOUNT_FILE')
 
 
 def is_non_interactive() -> bool:
@@ -41,13 +43,22 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
 # ---------- SAVE TO GOOGLE SHEET ----------
 def save_to_google_sheet(name, phone, email, company, address, website):
     creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=8080)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
+    # Prefer service account in hosted environments if provided
+    if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES
+        )
+    else:
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        if not creds or not creds.valid:
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            # Use fixed port if set for web client; default to 0 for loopback
+            port = int(os.getenv('OAUTH_PORT', '8080'))
+            creds = flow.run_local_server(port=port)
+            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+            with open(TOKEN_FILE, 'w') as token:
+                token.write(creds.to_json())
 
     service = build('sheets', 'v4', credentials=creds)
     values = [[name, phone, email, company, address, website]]
