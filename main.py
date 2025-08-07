@@ -45,7 +45,7 @@ def save_to_google_sheet(name, phone, email, company, address, website):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=0)
+        creds = flow.run_local_server(port=8080)
         with open(TOKEN_FILE, 'w') as token:
             token.write(creds.to_json())
 
