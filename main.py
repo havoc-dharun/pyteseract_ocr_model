@@ -145,6 +145,83 @@ def extract_lead_info(text):
             print("❌ Skipped saving.")
 
 
+# ---------- PURE PARSING HELPERS (NO I/O) ----------
+def parse_lead_info_basic(text: str) -> dict:
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    result = {"Name":"Not found","Phone":"Not found","Email":"Not found","Company":"Not found","Address":"Not found","Website":"Not found"}
+    company_keywords = r'\b(inc|ltd|llp|pvt|private|limited|corp|technologies|solutions|systems|enterprises|group|industries|co\.? )\b'
+    for line in lines:
+        lower = line.lower()
+        if result["Email"] == "Not found":
+            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", line)
+            if m: result["Email"] = m.group()
+        if result["Website"] == "Not found" and ("www" in lower or ".com" in lower or ".in" in lower):
+            m = re.search(r"((?:https?://)?(?:www\.)?[^\s,]+\.[a-z]{2,}(?:/[^\s]*)?)", line, re.IGNORECASE)
+            if m: result["Website"] = m.group()
+        if result["Phone"] == "Not found":
+            digits = re.sub(r'\D', '', line)
+            if len(digits) >= 10:
+                result["Phone"] = digits
+        if result["Address"] == "Not found" and any(tok in lower for tok in [" po", " road", " street", " st ", " kerala", " india", "/"]):
+            result["Address"] = line
+    for line in lines[:6]:
+        if re.search(company_keywords, line, re.IGNORECASE):
+            result["Company"] = line
+            break
+    if result["Company"] == "Not found":
+        for line in lines[:6]:
+            if line.isupper() and 1 <= len(line.split()) <= 4:
+                result["Company"] = line
+                break
+    if result["Company"] == "Not found":
+        for line in lines[:6]:
+            words = line.split()
+            if words and all(w[0].isupper() for w in words if w[0:1].isalpha()):
+                result["Company"] = line
+                break
+    for line in lines:
+        if (result["Name"] == "Not found" and
+            all(val not in line for val in [result["Email"], result["Phone"], result["Website"], result["Address"], result["Company"]]) and
+            not any(x in line for x in ['@', 'www', '/', '.com'])):
+            result["Name"] = line
+            break
+    return result
+
+
+def parse_lead_info_gemini(ocr_text: str) -> dict:
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key or genai is None:
+        return parse_lead_info_basic(ocr_text)
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        instruction = (
+            "Extract lead information from the OCR text of a business card and return a single JSON object "
+            "with exactly these keys: Name, Phone, Email, Company, Address, Website. "
+            "Rules: If a value is unknown, use 'Not found'. Phone should contain digits only (no spaces or symbols). "
+            "Prefer the company legal or display name; Address is a single-line mailing/location string if present; "
+            "Website may be a domain or full URL. Do not include any extra text.")
+        prompt = f"OCR Text:\n{ocr_text}"
+        resp = model.generate_content([
+            {"text": instruction},
+            {"text": prompt}
+        ])
+        raw = getattr(resp, 'text', None) or (resp.candidates[0].content.parts[0].text if getattr(resp, 'candidates', None) else None)
+        cleaned = _clean_json_from_markdown(raw or "")
+        data = json.loads(cleaned)
+        result = {
+            "Name": data.get('Name', 'Not found'),
+            "Phone": data.get('Phone', 'Not found'),
+            "Email": data.get('Email', 'Not found'),
+            "Company": data.get('Company', 'Not found'),
+            "Address": data.get('Address', 'Not found'),
+            "Website": data.get('Website', 'Not found'),
+        }
+        return result
+    except Exception:
+        return parse_lead_info_basic(ocr_text)
+
+
 # ---------- GEMINI-POWERED EXTRACTION ----------
 def _clean_json_from_markdown(text: str) -> str:
     if not text:
