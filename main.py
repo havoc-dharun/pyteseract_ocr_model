@@ -24,6 +24,20 @@ GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
 USE_GEMINI_DEFAULT = os.getenv('USE_GEMINI', '0') == '1'
 
 
+def is_non_interactive() -> bool:
+    return os.getenv('NON_INTERACTIVE', '0') == '1'
+
+
+def should_auto_save() -> bool:
+    return os.getenv('AUTO_SAVE', '0') == '1'
+
+
+def ask_yes_no(prompt: str, default: bool = False) -> bool:
+    if is_non_interactive():
+        return default
+    return input(prompt).strip().lower() == 'y'
+
+
 # ---------- SAVE TO GOOGLE SHEET ----------
 def save_to_google_sheet(name, phone, email, company, address, website):
     creds = None
@@ -109,7 +123,7 @@ def extract_lead_info(text):
     print(f"  Address: {address}")
     print(f"  Website: {website}")
 
-    if input("\n✏️ Edit any field? (y/n): ").strip().lower() == 'y':
+    if ask_yes_no("\n✏️ Edit any field? (y/n): "):
         name    = input(f"Name [{name}]: ") or name
         phone   = input(f"Phone [{phone}]: ") or phone
         email   = input(f"Email [{email}]: ") or email
@@ -117,11 +131,18 @@ def extract_lead_info(text):
         address = input(f"Address [{address}]: ") or address
         website = input(f"Website [{website}]: ") or website
 
-    if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
-        save_to_csv(name, phone, email, company, address, website)
-        save_to_google_sheet(name, phone, email, company, address, website)
+    if is_non_interactive():
+        if should_auto_save():
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
     else:
-        print("❌ Skipped saving.")
+        if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
 
 
 # ---------- GEMINI-POWERED EXTRACTION ----------
@@ -180,7 +201,7 @@ def extract_lead_info_gemini(ocr_text: str):
     print(f"  Address: {address}")
     print(f"  Website: {website}")
 
-    if input("\n✏️ Edit any field? (y/n): ").strip().lower() == 'y':
+    if ask_yes_no("\n✏️ Edit any field? (y/n): "):
         name    = input(f"Name [{name}]: ") or name
         phone   = input(f"Phone [{phone}]: ") or phone
         email   = input(f"Email [{email}]: ") or email
@@ -188,11 +209,18 @@ def extract_lead_info_gemini(ocr_text: str):
         address = input(f"Address [{address}]: ") or address
         website = input(f"Website [{website}]: ") or website
 
-    if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
-        save_to_csv(name, phone, email, company, address, website)
-        save_to_google_sheet(name, phone, email, company, address, website)
+    if is_non_interactive():
+        if should_auto_save():
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
     else:
-        print("❌ Skipped saving.")
+        if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
 
 
 # ---------- IMAGE CAPTURE FROM WEBCAM ----------
@@ -215,7 +243,7 @@ def capture_from_webcam():
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-        if input("✅ Proceed with this image? (y/n): ").strip().lower() == 'y':
+        if ask_yes_no("✅ Proceed with this image? (y/n): "):
             break
         print("🔁 Retake...\n")
 
@@ -223,8 +251,7 @@ def capture_from_webcam():
     text = pytesseract.image_to_string(gray)
     use_gemini = USE_GEMINI_DEFAULT and os.getenv('GEMINI_API_KEY')
     if os.getenv('GEMINI_API_KEY') and not USE_GEMINI_DEFAULT:
-        choice = input("🤖 Use Gemini for extraction? (y/n): ").strip().lower()
-        use_gemini = (choice == 'y')
+        use_gemini = ask_yes_no("🤖 Use Gemini for extraction? (y/n): ")
     if use_gemini:
         extract_lead_info_gemini(text)
     else:
@@ -241,8 +268,7 @@ def process_image_file():
     text = pytesseract.image_to_string(gray)
     use_gemini = USE_GEMINI_DEFAULT and os.getenv('GEMINI_API_KEY')
     if os.getenv('GEMINI_API_KEY') and not USE_GEMINI_DEFAULT:
-        choice = input("🤖 Use Gemini for extraction? (y/n): ").strip().lower()
-        use_gemini = (choice == 'y')
+        use_gemini = ask_yes_no("🤖 Use Gemini for extraction? (y/n): ")
     if use_gemini:
         extract_lead_info_gemini(text)
     else:
