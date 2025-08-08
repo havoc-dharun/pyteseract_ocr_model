@@ -3,10 +3,17 @@ import pytesseract
 import re
 import csv
 import os
+import json
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from google.oauth2 import service_account
+from google.auth import default as google_auth_default
+try:
+    import google.generativeai as genai
+except Exception:
+    genai = None
 
 # ---------- CONFIGURATION ----------
 SPREADSHEET_ID = "1C04dxBk3Ck9PUvRLaGt5FofR24_sAUSiniXngOC6VLg"
@@ -15,18 +22,53 @@ CSV_FILE = "leads.csv"
 CREDENTIALS_FILE = "credentials/client_secret.json"
 TOKEN_FILE = "credentials/token.json"
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-1.5-flash')
+USE_GEMINI_DEFAULT = os.getenv('USE_GEMINI', '0') == '1'
+SERVICE_ACCOUNT_FILE = os.getenv('SERVICE_ACCOUNT_FILE')
+
+
+def is_non_interactive() -> bool:
+    return os.getenv('NON_INTERACTIVE', '0') == '1'
+
+
+def should_auto_save() -> bool:
+    return os.getenv('AUTO_SAVE', '0') == '1'
+
+
+def ask_yes_no(prompt: str, default: bool = False) -> bool:
+    if is_non_interactive():
+        return default
+    return input(prompt).strip().lower() == 'y'
 
 
 # ---------- SAVE TO GOOGLE SHEET ----------
 def save_to_google_sheet(name, phone, email, company, address, website):
     creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
+    # Prefer service account key file if provided
+    if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
+        creds = service_account.Credentials.from_service_account_file(
+            SERVICE_ACCOUNT_FILE, scopes=SCOPES
+        )
+    else:
+        # Try ADC (e.g., Cloud Run service account)
+        try:
+            creds, _ = google_auth_default(scopes=SCOPES)
+        except Exception:
+            creds = None
+        # Fallback to user OAuth
+        if creds is None or not hasattr(creds, 'valid') or not creds.valid:
+            if os.path.exists(TOKEN_FILE):
+                try:
+                    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+                except Exception:
+                    creds = None
+            if not creds or not getattr(creds, 'valid', False):
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+                port = int(os.getenv('OAUTH_PORT', '8080'))
+                creds = flow.run_local_server(port=port)
+                os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
 
     service = build('sheets', 'v4', credentials=creds)
     values = [[name, phone, email, company, address, website]]
@@ -102,7 +144,7 @@ def extract_lead_info(text):
     print(f"  Address: {address}")
     print(f"  Website: {website}")
 
-    if input("\n✏️ Edit any field? (y/n): ").strip().lower() == 'y':
+    if ask_yes_no("\n✏️ Edit any field? (y/n): "):
         name    = input(f"Name [{name}]: ") or name
         phone   = input(f"Phone [{phone}]: ") or phone
         email   = input(f"Email [{email}]: ") or email
@@ -110,11 +152,173 @@ def extract_lead_info(text):
         address = input(f"Address [{address}]: ") or address
         website = input(f"Website [{website}]: ") or website
 
-    if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
-        save_to_csv(name, phone, email, company, address, website)
-        save_to_google_sheet(name, phone, email, company, address, website)
+    if is_non_interactive():
+        if should_auto_save():
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
     else:
-        print("❌ Skipped saving.")
+        if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
+
+
+# ---------- PURE PARSING HELPERS (NO I/O) ----------
+def parse_lead_info_basic(text: str) -> dict:
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
+    result = {"Name":"Not found","Phone":"Not found","Email":"Not found","Company":"Not found","Address":"Not found","Website":"Not found"}
+    company_keywords = r'\b(inc|ltd|llp|pvt|private|limited|corp|technologies|solutions|systems|enterprises|group|industries|co\.? )\b'
+    for line in lines:
+        lower = line.lower()
+        if result["Email"] == "Not found":
+            m = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", line)
+            if m: result["Email"] = m.group()
+        if result["Website"] == "Not found" and ("www" in lower or ".com" in lower or ".in" in lower):
+            m = re.search(r"((?:https?://)?(?:www\.)?[^\s,]+\.[a-z]{2,}(?:/[^\s]*)?)", line, re.IGNORECASE)
+            if m: result["Website"] = m.group()
+        if result["Phone"] == "Not found":
+            digits = re.sub(r'\D', '', line)
+            if len(digits) >= 10:
+                result["Phone"] = digits
+        if result["Address"] == "Not found" and any(tok in lower for tok in [" po", " road", " street", " st ", " kerala", " india", "/"]):
+            result["Address"] = line
+    for line in lines[:6]:
+        if re.search(company_keywords, line, re.IGNORECASE):
+            result["Company"] = line
+            break
+    if result["Company"] == "Not found":
+        for line in lines[:6]:
+            if line.isupper() and 1 <= len(line.split()) <= 4:
+                result["Company"] = line
+                break
+    if result["Company"] == "Not found":
+        for line in lines[:6]:
+            words = line.split()
+            if words and all(w[0].isupper() for w in words if w[0:1].isalpha()):
+                result["Company"] = line
+                break
+    for line in lines:
+        if (result["Name"] == "Not found" and
+            all(val not in line for val in [result["Email"], result["Phone"], result["Website"], result["Address"], result["Company"]]) and
+            not any(x in line for x in ['@', 'www', '/', '.com'])):
+            result["Name"] = line
+            break
+    return result
+
+
+def parse_lead_info_gemini(ocr_text: str) -> dict:
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key or genai is None:
+        return parse_lead_info_basic(ocr_text)
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        instruction = (
+            "Extract lead information from the OCR text of a business card and return a single JSON object "
+            "with exactly these keys: Name, Phone, Email, Company, Address, Website. "
+            "Rules: If a value is unknown, use 'Not found'. Phone should contain digits only (no spaces or symbols). "
+            "Prefer the company legal or display name; Address is a single-line mailing/location string if present; "
+            "Website may be a domain or full URL. Do not include any extra text.")
+        prompt = f"OCR Text:\n{ocr_text}"
+        resp = model.generate_content([
+            {"text": instruction},
+            {"text": prompt}
+        ])
+        raw = getattr(resp, 'text', None) or (resp.candidates[0].content.parts[0].text if getattr(resp, 'candidates', None) else None)
+        cleaned = _clean_json_from_markdown(raw or "")
+        data = json.loads(cleaned)
+        result = {
+            "Name": data.get('Name', 'Not found'),
+            "Phone": data.get('Phone', 'Not found'),
+            "Email": data.get('Email', 'Not found'),
+            "Company": data.get('Company', 'Not found'),
+            "Address": data.get('Address', 'Not found'),
+            "Website": data.get('Website', 'Not found'),
+        }
+        return result
+    except Exception:
+        return parse_lead_info_basic(ocr_text)
+
+
+# ---------- GEMINI-POWERED EXTRACTION ----------
+def _clean_json_from_markdown(text: str) -> str:
+    if not text:
+        return text
+    text = text.strip()
+    if text.startswith("```"):
+        # remove code fences if present
+        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+        return "\n".join(lines).strip()
+    return text
+
+
+def extract_lead_info_gemini(ocr_text: str):
+    api_key = os.getenv('GEMINI_API_KEY')
+    if not api_key:
+        print("⚠️ GEMINI_API_KEY not set. Falling back to basic extraction.")
+        return extract_lead_info(ocr_text)
+    if genai is None:
+        print("⚠️ google-generativeai package not available. Falling back to basic extraction.")
+        return extract_lead_info(ocr_text)
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        instruction = (
+            "Extract lead information from the OCR text of a business card and return a single JSON object "
+            "with exactly these keys: Name, Phone, Email, Company, Address, Website. "
+            "Rules: If a value is unknown, use 'Not found'. Phone should contain digits only (no spaces or symbols). "
+            "Prefer the company legal or display name; Address is a single-line mailing/location string if present; "
+            "Website may be a domain or full URL. Do not include any extra text.")
+        prompt = f"OCR Text:\n{ocr_text}"
+        resp = model.generate_content([
+            {"text": instruction},
+            {"text": prompt}
+        ])
+        raw = getattr(resp, 'text', None) or (resp.candidates[0].content.parts[0].text if getattr(resp, 'candidates', None) else None)
+        cleaned = _clean_json_from_markdown(raw or "")
+        data = json.loads(cleaned)
+        name = data.get('Name', 'Not found')
+        phone = data.get('Phone', 'Not found')
+        email = data.get('Email', 'Not found')
+        company = data.get('Company', 'Not found')
+        address = data.get('Address', 'Not found')
+        website = data.get('Website', 'Not found')
+    except Exception as e:
+        print(f"⚠️ Gemini extraction failed: {e}. Falling back to basic extraction.")
+        return extract_lead_info(ocr_text)
+
+    print("\n🤖 Gemini Extracted Lead Info:")
+    print(f"  Name:    {name}")
+    print(f"  Phone:   {phone}")
+    print(f"  Email:   {email}")
+    print(f"  Company: {company}")
+    print(f"  Address: {address}")
+    print(f"  Website: {website}")
+
+    if ask_yes_no("\n✏️ Edit any field? (y/n): "):
+        name    = input(f"Name [{name}]: ") or name
+        phone   = input(f"Phone [{phone}]: ") or phone
+        email   = input(f"Email [{email}]: ") or email
+        company = input(f"Company [{company}]: ") or company
+        address = input(f"Address [{address}]: ") or address
+        website = input(f"Website [{website}]: ") or website
+
+    if is_non_interactive():
+        if should_auto_save():
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
+    else:
+        if input("\n💾 Save to CSV & Google Sheet? (y/n): ").strip().lower() == 'y':
+            save_to_csv(name, phone, email, company, address, website)
+            save_to_google_sheet(name, phone, email, company, address, website)
+        else:
+            print("❌ Skipped saving.")
 
 
 # ---------- IMAGE CAPTURE FROM WEBCAM ----------
@@ -137,13 +341,19 @@ def capture_from_webcam():
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
-        if input("✅ Proceed with this image? (y/n): ").strip().lower() == 'y':
+        if ask_yes_no("✅ Proceed with this image? (y/n): "):
             break
         print("🔁 Retake...\n")
 
     gray = cv2.cvtColor(cv2.imread("captured_card.jpg"), cv2.COLOR_BGR2GRAY)
     text = pytesseract.image_to_string(gray)
-    extract_lead_info(text)
+    use_gemini = USE_GEMINI_DEFAULT and os.getenv('GEMINI_API_KEY')
+    if os.getenv('GEMINI_API_KEY') and not USE_GEMINI_DEFAULT:
+        use_gemini = ask_yes_no("🤖 Use Gemini for extraction? (y/n): ")
+    if use_gemini:
+        extract_lead_info_gemini(text)
+    else:
+        extract_lead_info(text)
 
 
 # ---------- PROCESS EXISTING IMAGE ----------
@@ -154,7 +364,13 @@ def process_image_file():
         return
     gray = cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2GRAY)
     text = pytesseract.image_to_string(gray)
-    extract_lead_info(text)
+    use_gemini = USE_GEMINI_DEFAULT and os.getenv('GEMINI_API_KEY')
+    if os.getenv('GEMINI_API_KEY') and not USE_GEMINI_DEFAULT:
+        use_gemini = ask_yes_no("🤖 Use Gemini for extraction? (y/n): ")
+    if use_gemini:
+        extract_lead_info_gemini(text)
+    else:
+        extract_lead_info(text)
 
 
 # ---------- MAIN MENU ----------
