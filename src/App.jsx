@@ -17,6 +17,9 @@ export default function App(){
   const [fields, setFields] = useState({Name:'', Phone:'', Email:'', Company:'', Address:'', Website:''})
   const [status, setStatus] = useState('')
 
+  // API base for Netlify/hosted environments
+  const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '')
+
   // Camera state
   const [useCamera, setUseCamera] = useState(false)
   const videoRef = useRef(null)
@@ -99,7 +102,7 @@ export default function App(){
         form.append('file', file)
       }
       form.append('use_gemini', String(useGemini))
-      const res = await fetch('/api/extract', { method:'POST', body: form })
+      const res = await fetch(`${API_BASE}/api/extract`, { method:'POST', body: form })
       if(!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setOcrText(data.ocr_text || '')
@@ -124,7 +127,7 @@ export default function App(){
       Object.entries(fields).forEach(([k,v])=> form.append(k.toLowerCase(), v))
       form.append('to_csv', 'true')
       form.append('to_sheet', String(!!toSheet))
-      const res = await fetch('/api/save', { method:'POST', body: form })
+      const res = await fetch(`${API_BASE}/api/save`, { method:'POST', body: form })
       if(!res.ok) throw new Error(await res.text())
       const data = await res.json()
       setStatus('Saved: ' + JSON.stringify(data))
