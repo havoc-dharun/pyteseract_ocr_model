@@ -1,0 +1,18 @@
+# Dependencies and build
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+
+# Environment and OS
+.env
+.DS_Store
+
+# Credentials and tokens
+credentials/*.json
+!credentials/README.md
+
+# Editor/Tooling
+.vscode/
+.idea/
