@@ -9,6 +9,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.oauth2 import service_account
+from google.auth import default as google_auth_default
 try:
     import google.generativeai as genai
 except Exception:
@@ -43,22 +44,31 @@ def ask_yes_no(prompt: str, default: bool = False) -> bool:
 # ---------- SAVE TO GOOGLE SHEET ----------
 def save_to_google_sheet(name, phone, email, company, address, website):
     creds = None
-    # Prefer service account in hosted environments if provided
+    # Prefer service account key file if provided
     if SERVICE_ACCOUNT_FILE and os.path.exists(SERVICE_ACCOUNT_FILE):
         creds = service_account.Credentials.from_service_account_file(
             SERVICE_ACCOUNT_FILE, scopes=SCOPES
         )
     else:
-        if os.path.exists(TOKEN_FILE):
-            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            # Use fixed port if set for web client; default to 0 for loopback
-            port = int(os.getenv('OAUTH_PORT', '8080'))
-            creds = flow.run_local_server(port=port)
-            os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
-            with open(TOKEN_FILE, 'w') as token:
-                token.write(creds.to_json())
+        # Try ADC (e.g., Cloud Run service account)
+        try:
+            creds, _ = google_auth_default(scopes=SCOPES)
+        except Exception:
+            creds = None
+        # Fallback to user OAuth
+        if creds is None or not hasattr(creds, 'valid') or not creds.valid:
+            if os.path.exists(TOKEN_FILE):
+                try:
+                    creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+                except Exception:
+                    creds = None
+            if not creds or not getattr(creds, 'valid', False):
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+                port = int(os.getenv('OAUTH_PORT', '8080'))
+                creds = flow.run_local_server(port=port)
+                os.makedirs(os.path.dirname(TOKEN_FILE), exist_ok=True)
+                with open(TOKEN_FILE, 'w') as token:
+                    token.write(creds.to_json())
 
     service = build('sheets', 'v4', credentials=creds)
     values = [[name, phone, email, company, address, website]]
